@@ -45,6 +45,7 @@ int main(int argc, char *argv[])
   std::cout << "N: " << N << std::endl;
   std::cout << "numBlocks: " << numBlocks << std::endl;
   std::cout << "blockSize: " << blockSize << std::endl;
+  std::cout << "Num FMA: " << numFMAs << std::endl;
 
   // Allocate Unified Memory – accessible from CPU or GPU
   float *x, *y;
