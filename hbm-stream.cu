@@ -1,6 +1,6 @@
-#include "../MeasurementSeries.hpp"
-#include "../dtime.hpp"
-#include "../gpu-error.h"
+#include "MeasurementSeries.hpp"
+#include "dtime.hpp"
+#include "gpu-error.h"
 #include <iomanip>
 #include <iostream>
 #include <unistd.h>
@@ -164,7 +164,7 @@ __global__ void stencil1d5pt_kernel(T *A, const T *__restrict__ B,
     A[tidx] = spoiler[tidx];
 }
 void measureFunc(kernel_ptr_type func, int streamCount, int blockSize, int gridSize,
-                 int blocksPerSM) {
+                 int blocksPerSM, bool warmup = true) {
 
 #ifdef __NVCC__
   int maxActiveBlocks = 0;
@@ -187,11 +187,17 @@ void measureFunc(kernel_ptr_type func, int streamCount, int blockSize, int gridS
     cout << "! " << maxActiveBlocks << " blocks per SM ";
 #endif
 
+  // NCU Profling
+  if(!warmup)
+  {
+    func<<<gridSize, blockSize>>>(dA, dB, dC, dD, max_buffer_size, false);
+    return;
+  }
+
   MeasurementSeries time;
   MeasurementSeries power;
 
-  func<<<max_buffer_size / blockSize + 1, blockSize>>>(dA, dB, dC, dD,
-                                                       max_buffer_size, false);
+  func<<<max_buffer_size / blockSize + 1, blockSize>>>(dA, dB, dC, dD, max_buffer_size, false);
 
   for (int iter = 0; iter < 9; iter++) {
     GPU_ERROR(cudaDeviceSynchronize());
@@ -226,8 +232,11 @@ void measureKernels(vector<pair<kernel_ptr_type, int>> kernels, int blockSize, i
   int threadsPerSM = prop.maxThreadsPerMultiProcessor;
   int threadsPerBlock = prop.maxThreadsPerBlock;
 
-  if (blockSize * blocksPerSM > threadsPerSM || blockSize > threadsPerBlock)
+  if (blockSize * blocksPerSM > threadsPerSM || blockSize > threadsPerBlock) {
+    cout << "Device Threads Per SM = " << threadsPerSM << endl;
+    cout << "Device Threads Per Block = " << threadsPerBlock << endl;
     return;
+  }
 
   int smCount = prop.multiProcessorCount;
   int threadBlocks = smCount * blocksPerSM;
@@ -239,7 +248,7 @@ void measureKernels(vector<pair<kernel_ptr_type, int>> kernels, int blockSize, i
        << " %  |  GB/s: ";
 
   for (auto kernel : kernels) {
-    measureFunc(kernel.first, kernel.second, blockSize, gridSize, blocksPerSM);
+    measureFunc(kernel.first, kernel.second, blockSize, gridSize, blocksPerSM, kernels.size() != 1);
   }
 
   cout << "\n";
@@ -251,6 +260,16 @@ int main(int argc, char **argv) {
   GPU_ERROR(cudaMalloc(&dC, max_buffer_size * sizeof(double)));
   GPU_ERROR(cudaMalloc(&dD, max_buffer_size * sizeof(double)));
 
+  vector<pair<kernel_ptr_type, int>> all_kernels = {
+      {init_kernel<double>, 1},         {read_kernel<double>, 1},
+      {scale_kernel<double>, 2},        {triad_kernel<double>, 3},
+      {rmw_kernel<double>, 1}
+  };
+  vector<pair<kernel_ptr_type, int>> kernels;
+  int gridSize = 0;
+  int blockSize = 0;
+
+#ifdef ORG_VERSION
   init_kernel<<<max_buffer_size / 1024 + 1, 1024>>>(dA, dA, dA, dA,
                                                     max_buffer_size, false);
   init_kernel<<<max_buffer_size / 1024 + 1, 1024>>>(dB, dB, dB, dB,
@@ -261,7 +280,6 @@ int main(int argc, char **argv) {
                                                     max_buffer_size, false);
   GPU_ERROR(cudaDeviceSynchronize());
 
-#ifdef ORG_VERSION
   vector<pair<kernel_ptr_type, int>> kernels = {
       {init_kernel<double>, 1},         {read_kernel<double>, 1},
       {scale_kernel<double>, 2},        {triad_kernel<double>, 3},
@@ -270,67 +288,75 @@ int main(int argc, char **argv) {
   cout << "blockSize   threads       %occ  |                init"
        << "       read       scale     triad       3pt        5pt\n";
 #else
-  vector<pair<kernel_ptr_type, int>> kernels = {
-      {init_kernel<double>, 1},         {read_kernel<double>, 1},
-      {scale_kernel<double>, 2},        {triad_kernel<double>, 3},
-      {rmw_kernel<double>, 1}};
+  // check if ncu selected runs requested
+  if(argc > 1)
+  {
+     int kernelType = std::atoi(argv[1]);
+     gridSize = std::atoi(argv[2]);
+     blockSize = std::atoi(argv[3]);
+     kernels.push_back(all_kernels[kernelType]);
+     cout << "gridsize   blockSize   threads       %occ  |                BW (GB/s)\n";
+     measureKernels(kernels, blockSize, gridSize, 2);
+  }
+  else
+  {
+	gridSize = 1;
+	blockSize = 32;
+	kernels = all_kernels;
+
+
+	cout << " ------------------------------ SINGLE GRID ------------------------------------------------------------ \n";
+	cout << "gridsize   blockSize   threads       %occ  |                init"
+	<< "       read       scale     triad       rmw\n";
+	sleep(2);
+	for (blockSize = 32; blockSize <= 1024; blockSize += 32) {
+	   measureKernels(kernels, blockSize, gridSize, 2);
+	}
+
+	cout << " ------------------------------ INCREASING GRID ------------------------------------------------------------ \n";
+	cout << "gridsize   blockSize   threads       %occ  |                init"
+	<< "       read       scale     triad       rmw\n";
+	sleep(2);
+	blockSize = 1024;
+	for(gridSize = 2; gridSize <= 256; gridSize++) {
+     	   measureKernels(kernels, blockSize, gridSize, 2);
+	}
+	sleep(2);
+	for(gridSize = 257; gridSize <= 1024; gridSize += 16) {
+   	   measureKernels(kernels, blockSize, gridSize, 2);
+	}
+
+	cout << " ------------------------------ MAX GRID ------------------------------------------------------------ \n";
+	cout << "gridsize   blockSize   threads       %occ  |                init"
+	<< "       read       scale     triad       rmw\n";
+	sleep(2);
+	for (blockSize = 32; blockSize <= 1024; blockSize += 32) {
+	gridSize = max_buffer_size / blockSize + 1;
+	   measureKernels(kernels, blockSize, gridSize, 2);
+	}
+
+	cout << " ------------------------------ BLK/SM = 4  ------------------------------------------------------------ \n";
+	cout << "gridsize   blockSize   threads       %occ  |                init"
+	<< "       read       scale     triad       rmw\n";
+	blockSize = 512;
+	sleep(2);
+	for(gridSize = 257; gridSize <= 1024; gridSize += 16) {
+	   measureKernels(kernels, blockSize, gridSize, 4);
+	}
+
+	cout << " ------------------------------ BLK/SM = 16 ------------------------------------------------------------ \n";
+	cout << "gridsize   blockSize   threads       %occ  |                init"
+	<< "       read       scale     triad       rmw\n";
+	cout << " ------------------------------------------------------------------------------------------ \n";
+	blockSize = 128;
+	sleep(2);
+	for(gridSize = 257; gridSize <= 1024; gridSize += 16) {
+	   measureKernels(kernels, blockSize, gridSize, 16);
+	}
+
+	}
 
 #endif
-
-  // for (int blockSize = 32; blockSize <= 1024; blockSize += 32) {
-  //   measureKernels(kernels, blockSize, 1);
-  // }
-  int gridSize = 1;
-  int blockSize = 32;
-
-  cout << " ------------------------------ SINGLE GRID ------------------------------------------------------------ \n";
-  cout << "gridsize   blockSize   threads       %occ  |                init"
-       << "       read       scale     triad       rmw\n";
-  sleep(2);
-  for (blockSize = 32; blockSize <= 1024; blockSize += 32) {
-    measureKernels(kernels, blockSize, gridSize, 2);
-  }
-
-  cout << " ------------------------------ INCREASING GRID ------------------------------------------------------------ \n";
-  cout << "gridsize   blockSize   threads       %occ  |                init"
-       << "       read       scale     triad       rmw\n";
-  sleep(2);
-  blockSize = 1024;
-  for(gridSize = 2; gridSize <= 256; gridSize++) {
-    measureKernels(kernels, blockSize, gridSize, 2);
-  }
-  sleep(2);
-  for(gridSize = 257; gridSize <= 1024; gridSize += 16) {
-    measureKernels(kernels, blockSize, gridSize, 2);
-  }
-
-  cout << " ------------------------------ MAX GRID ------------------------------------------------------------ \n";
-  cout << "gridsize   blockSize   threads       %occ  |                init"
-       << "       read       scale     triad       rmw\n";
-  sleep(2);
-  for (blockSize = 32; blockSize <= 1024; blockSize += 32) {
-    gridSize = max_buffer_size / blockSize + 1;
-    measureKernels(kernels, blockSize, gridSize, 2);
-  }
-
-  cout << " ------------------------------ BLK/SM = 4  ------------------------------------------------------------ \n";
-  cout << "gridsize   blockSize   threads       %occ  |                init"
-       << "       read       scale     triad       rmw\n";
-  blockSize = 512;
-  sleep(2);
-  for(gridSize = 257; gridSize <= 1024; gridSize += 16) {
-    measureKernels(kernels, blockSize, gridSize, 4);
-  }
-
-  cout << " ------------------------------ BLK/SM = 16 ------------------------------------------------------------ \n";
-  cout << "gridsize   blockSize   threads       %occ  |                init"
-       << "       read       scale     triad       rmw\n";
-  cout << " ------------------------------------------------------------------------------------------ \n";
-  blockSize = 128;
-  sleep(2);
-  for(gridSize = 257; gridSize <= 1024; gridSize += 16) {
-    measureKernels(kernels, blockSize, gridSize, 16);
-  }
 
   GPU_ERROR(cudaFree(dA));
   GPU_ERROR(cudaFree(dB));
