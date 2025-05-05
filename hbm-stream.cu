@@ -7,9 +7,6 @@
 
 using namespace std;
 
-constexpr int MAXThreadsPerSM = 2048;
-constexpr int MAXWarpSize = 32;
-
 const int64_t max_buffer_size = 128l * 1024 * 1024 + 2;
 double *dA, *dB, *dC, *dD;
 
@@ -304,47 +301,59 @@ int main(int argc, char **argv) {
   else
   {
 	gridSize = 1;
-	blockSize = MAXWarpSize;
+	blockSize = 32;
 	kernels = all_kernels;
 
 
 	cout << " ------------------------------ SINGLE GRID ------------------------------------------------------------ \n";
 	cout << "gridsize   blockSize   threads       %occ  |                init"
-	     << "       read       scale     triad       rmw\n";
+	<< "       read       scale     triad       rmw\n";
 	sleep(2);
-	for (blockSize = MAXWarpSize; blockSize <= 1024; blockSize += MAXWarpSize)
+	for (blockSize = 32; blockSize <= 1024; blockSize += 32) {
 	   measureKernels(kernels, blockSize, gridSize, 2);
+	}
 
-  // Vary the Blocks/Per SM and the GridSize to measure which provides the best BW
-  for(auto blocksPerSM = 2; blocksPerSM <=16; blocksPerSM *= 2)
-  {
-	   cout << " ------------------------- INCREASING GRID Blocks Per SM : " << blocksPerSM << " ------------------------- \n";
-	   cout << "gridsize   blockSize   threads       %occ  |                init"
-	        << "       read       scale     triad       rmw\n";
-	   sleep(2);
+	cout << " ------------------------------ INCREASING GRID ------------------------------------------------------------ \n";
+	cout << "gridsize   blockSize   threads       %occ  |                init"
+	<< "       read       scale     triad       rmw\n";
+	sleep(2);
+	blockSize = 1024;
+	for(gridSize = 2; gridSize <= 256; gridSize++) {
+     	   measureKernels(kernels, blockSize, gridSize, 2);
+	}
+	sleep(2);
+	for(gridSize = 257; gridSize <= 1024; gridSize += 16) {
+   	   measureKernels(kernels, blockSize, gridSize, 2);
+	}
 
-	   blockSize = MAXThreadsPerSM / blocksPerSM;
+	cout << " ------------------------------ MAX GRID ------------------------------------------------------------ \n";
+	cout << "gridsize   blockSize   threads       %occ  |                init"
+	<< "       read       scale     triad       rmw\n";
+	sleep(2);
+	for (blockSize = 32; blockSize <= 1024; blockSize += 32) {
+	gridSize = max_buffer_size / blockSize + 1;
+	   measureKernels(kernels, blockSize, gridSize, 2);
+	}
 
-	   for(gridSize = 2; gridSize <= 512; gridSize++)
-     	   measureKernels(kernels, blockSize, gridSize, blocksPerSM);
-	   sleep(2);
-	   for(gridSize = 512; gridSize <= 1024; gridSize += 8)
-   	     measureKernels(kernels, blockSize, gridSize, blocksPerSM);
- }
+	cout << " ------------------------------ BLK/SM = 4  ------------------------------------------------------------ \n";
+	cout << "gridsize   blockSize   threads       %occ  |                init"
+	<< "       read       scale     triad       rmw\n";
+	blockSize = 512;
+	sleep(2);
+	for(gridSize = 257; gridSize <= 1024; gridSize += 16) {
+	   measureKernels(kernels, blockSize, gridSize, 4);
+	}
 
- for(auto blocksPerSM = 2; blocksPerSM <=16; blocksPerSM *= 2)
- {
-	   cout << " ------------------------------ MAX GRID Blocks Per SM : " << blocksPerSM << " ------------------------- \n";
-	   cout << "gridsize   blockSize   threads       %occ  |                init"
-	        << "       read       scale     triad       rmw\n";
-	   sleep(2);
+	cout << " ------------------------------ BLK/SM = 16 ------------------------------------------------------------ \n";
+	cout << "gridsize   blockSize   threads       %occ  |                init"
+	<< "       read       scale     triad       rmw\n";
+	cout << " ------------------------------------------------------------------------------------------ \n";
+	blockSize = 128;
+	sleep(2);
+	for(gridSize = 257; gridSize <= 1024; gridSize += 16) {
+	   measureKernels(kernels, blockSize, gridSize, 16);
+	}
 
-	   for (blockSize = MAXWarpSize; blockSize <= MAXThreadsPerSM / blocksPerSM; blockSize += MAXWarpSize)
-     {
-	      gridSize = max_buffer_size / blockSize;
-	      measureKernels(kernels, blockSize, gridSize, blocksPerSM);
-	   }
-  }
 	}
 
 #endif
